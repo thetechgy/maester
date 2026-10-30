@@ -183,6 +183,16 @@ The current [REST rules reference](https://docs.github.com/en/rest/repos/rules?a
 does not document the repository target in its target enum, so the probe uses the
 GraphQL representation and does not guess an undocumented REST policy endpoint.
 
+The policy query omits the optional `Enterprise.slug` selection. Requesting that
+field can cause `INSUFFICIENT_SCOPES` for the entire query, even when the policy
+connection is empty. The source's `__typename` is retained. If an enterprise-source
+policy is returned, its data remains available but the operation is `Incomplete`
+with `EnterpriseSourceIdentityNotCollected`; the enterprise identifier was not
+collected. Organization and repository source identifiers are still requested.
+This avoids requiring broader token scopes solely for an optional identifier.
+An observed empty connection describes this query's visible repository-policy
+population, not the absence of legacy enterprise policies or equivalent controls.
+
 The public GraphQL rule parameter union does not document an authorization parameter
 fragment. The runner requests available parameter `__typename` only and marks
 `AUTHORIZATION` rules `AuthorizationParametersUnavailable`; it cannot prove which

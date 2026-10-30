@@ -241,11 +241,14 @@ query CollaboratorSources($org:String!,$repo:String!,$after:String){
     } -Items edges
 
     # Keep bypass separate: an inaccessible field must not discard core policy evidence.
+    # Enterprise.slug can gate the entire query on an additional scope even when
+    # no policies are returned. Retain the source type and explicitly flag its
+    # uncollected enterprise identity when an enterprise policy is returned.
     $policyQuery = @'
 query RepositoryPolicies($org:String!,$repo:String!,$after:String){
   repository(owner:$org,name:$repo){rulesets(first:100,after:$after,includeParents:true,targets:[REPOSITORY]){
     totalCount pageInfo{hasNextPage endCursor} nodes{
-      databaseId name target enforcement source{__typename ... on Organization{login} ... on Enterprise{slug} ... on Repository{nameWithOwner}}
+      databaseId name target enforcement source{__typename ... on Organization{login} ... on Repository{nameWithOwner}}
       conditions{repositoryId{repositoryIds} repositoryName{include exclude protected}
         repositoryProperty{include{name propertyValues source} exclude{name propertyValues source}}}
       rules(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{type parameters{__typename}}}
@@ -277,6 +280,9 @@ query PolicyBypass($org:String!,$repo:String!,$after:String){
     foreach ($record in @($policies, $bypass)) {
         foreach ($page in $record.Data) {
             foreach ($policy in $page.nodes) {
+                if ($record.Name -eq 'RepositoryPolicies' -and $policy.source.__typename -eq 'Enterprise') {
+                    Add-Gap -Record $record -Kind EnterpriseSourceIdentityNotCollected -Field '$.nodes[].source'; $record.Outcome = 'Incomplete'
+                }
                 $nested = if ($record.Name -eq 'RepositoryPolicies') { $policy.rules } else { $policy.bypassActors }
                 if ($null -eq $nested -or $nested.pageInfo.hasNextPage -ne $false -or $nested.nodes -isnot [array] -or $nested.totalCount -ne $nested.nodes.Count) {
                     Add-Gap -Record $record -Kind NestedCollectionIncomplete -Field '$.nodes'; $record.Outcome = 'Incomplete'

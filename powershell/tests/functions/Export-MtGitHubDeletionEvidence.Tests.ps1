@@ -94,6 +94,28 @@ Describe 'Deletion evidence runner through real GitHub transports' {
                             $result; break
                         }
                         RepositoryPolicies {
+                            if ($global:MtDeletionProbeFixtureState.Mode -eq 'scope-gated-empty-policy') {
+                                if (($Body | ConvertFrom-Json).query.Contains(' ... on Enterprise{slug}')) {
+                                    @{ errors = @(@{ type = 'INSUFFICIENT_SCOPES'; message = 'private scope detail' }); data = $null }
+                                } else {
+                                    @{ data = @{ repository = @{ rulesets = @{ totalCount = 0; pageInfo = $pageInfo; nodes = @() } } } }
+                                }
+                                break
+                            }
+                            if ($global:MtDeletionProbeFixtureState.Mode -like 'policy-source-*') {
+                                $kind = $global:MtDeletionProbeFixtureState.Mode.Substring('policy-source-'.Length)
+                                $source = switch ($kind) {
+                                    Organization { @{ __typename = 'Organization'; login = 'fixture-org' } }
+                                    Repository { @{ __typename = 'Repository'; nameWithOwner = 'fixture-org/fixture-repo' } }
+                                    Enterprise { @{ __typename = 'Enterprise' } }
+                                }
+                                @{ data = @{ repository = @{ rulesets = @{ totalCount = 1; pageInfo = $pageInfo; nodes = @(@{
+                                    databaseId = 81240; name = 'fixture-policy'; target = 'REPOSITORY'; enforcement = 'ACTIVE'; source = $source
+                                    conditions = @{ repositoryId = $null; repositoryName = @{ include = @('fixture-repo'); exclude = @(); protected = $true }; repositoryProperty = $null }
+                                    rules = @{ totalCount = 0; pageInfo = $pageInfo; nodes = @() }
+                                }) } } } }
+                                break
+                            }
                             $rulePage = @{ hasNextPage = ($global:MtDeletionProbeFixtureState.Mode -eq 'nested-cap'); endCursor = $null }
                             @{ data = @{ repository = @{ rulesets = @{ totalCount = 1; pageInfo = $pageInfo; nodes = @(@{
                                 databaseId = 81240; name = 'fixture-policy'; target = 'REPOSITORY'; enforcement = 'ACTIVE'; source = @{ __typename = 'Organization'; login = 'fixture-org' }
@@ -142,6 +164,49 @@ Describe 'Deletion evidence runner through real GitHub transports' {
         (Get-Operation -Report $run.Summary -Name RepositoryCollaborators).Data[0].permissions.admin | Should -BeOfType ([bool])
         (Get-Operation -Report $run.Summary -Name CollaboratorSources).Data[0].edges[0].permissionSources | Should -HaveCount 2
         (Get-Operation -Report $run.Summary -Name CollaboratorSources).Data[0].edges[0].permissionSources[0].source.__typename | Should -Be Organization
+    }
+
+    It 'collects an empty policy connection without requesting an optional enterprise slug' {
+        $global:MtDeletionProbeFixtureState.Mode = 'scope-gated-empty-policy'
+        $run = Invoke-ProbeFixture
+        foreach ($report in @($run.Detailed, $run.Summary)) {
+            $op = Get-Operation -Report $report -Name RepositoryPolicies
+            $op.Outcome | Should -Be Observed
+            $op.ItemCount | Should -Be 0
+            $op.PaginationComplete | Should -BeTrue
+            $op.Gaps | Should -BeNullOrEmpty
+            $op.Data[0].totalCount | Should -Be 0
+            $op.Data[0].nodes | Should -HaveCount 0
+        }
+        $requests = @($global:MtDeletionProbeFixtureState.Requests | Where-Object Operation -eq RepositoryPolicies)
+        $requests | Should -HaveCount 1
+        ($requests[0].Body | ConvertFrom-Json).query | Should -Not -Match '\.\.\.\s+on\s+Enterprise\s*\{\s*slug\s*\}'
+    }
+
+    It 'retains <SourceKind> policy data with explicit source-identity coverage' -ForEach @(
+        @{ SourceKind = 'Organization'; ExpectedOutcome = 'Observed' },
+        @{ SourceKind = 'Repository'; ExpectedOutcome = 'Observed' },
+        @{ SourceKind = 'Enterprise'; ExpectedOutcome = 'Incomplete' }
+    ) {
+        $global:MtDeletionProbeFixtureState.Mode = "policy-source-$SourceKind"
+        $run = Invoke-ProbeFixture
+        foreach ($report in @($run.Detailed, $run.Summary)) {
+            $op = Get-Operation -Report $report -Name RepositoryPolicies
+            $op.Outcome | Should -Be $ExpectedOutcome
+            $op.ItemCount | Should -Be 1
+            $op.PaginationComplete | Should -BeTrue
+            $op.Data[0].nodes[0].source.__typename | Should -Be $SourceKind
+            if ($SourceKind -eq 'Enterprise') {
+                $op.Gaps | Should -HaveCount 1
+                $op.Gaps[0].Kind | Should -Be EnterpriseSourceIdentityNotCollected
+                $op.Gaps[0].Field | Should -Be '$.nodes[].source'
+                $op.Data[0].nodes[0].source.PSObject.Properties.Name | Should -Not -Contain slug
+            } else {
+                $op.Gaps | Should -BeNullOrEmpty
+            }
+        }
+        (Get-Operation -Report $run.Summary -Name RepositoryPolicies).Data |
+            ConvertTo-Json -Depth 20 | Should -Not -Match 'fixture-org|fixture-repo|fixture-policy|81240'
     }
 
     It 'pins new GETs, preserves bootstrap defaults, and only posts static read queries on <ApiHost>' -ForEach @(
